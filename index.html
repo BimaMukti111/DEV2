@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-    <title>DEV-2</title>
+    <title>SOUTH-E-IoT</title>
     
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -260,7 +260,7 @@
     <div class="container">
         <!-- Header -->
         <div class="header">
-            <h1>DEV-2</h1>
+            <h1>🚗 SOUTH-E-IoT <span>| ThingSpeak + ESP32</span></h1>
             <div class="btn-group">
                 <button id="followBtn" class="btn btn-primary">📍 Auto Follow: ON</button>
                 <button id="resetBtn" class="btn btn-secondary">🎯 Reset Peta</button>
@@ -285,7 +285,7 @@
                 <div class="stat-value" id="speed">--- <span class="stat-unit">km/h</span></div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">📏 Estimasi Jarak Tempuh</div>
+                <div class="stat-label">📏 Jarak Total</div>
                 <div class="stat-value" id="distance">--- <span class="stat-unit">km</span></div>
             </div>
             <div class="stat-card">
@@ -314,6 +314,26 @@
                 <div class="gauge-value" id="soc">--- <span class="stat-unit">%</span></div>
                 <div class="progress-bar"><div class="progress-fill" id="socFill"></div></div>
                 <div id="socWarning" class="warning" style="display: none;">⚠️ SOC rendah! Segera charge baterai.</div>
+            </div>
+        </div>
+
+        <!-- Tambahan Data Energi dari ESP32 -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">🔌 Energi Terpakai</div>
+                <div class="stat-value" id="energyUsed">--- <span class="stat-unit">Wh</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">🔋 Energi Tersisa</div>
+                <div class="stat-value" id="energyRemaining">--- <span class="stat-unit">Wh</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">📉 Konsumsi</div>
+                <div class="stat-value" id="consumption">--- <span class="stat-unit">Wh/km</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">🛣️ Estimasi Jarak Sisa</div>
+                <div class="stat-value" id="estimatedRange">--- <span class="stat-unit">km</span></div>
             </div>
         </div>
         
@@ -393,21 +413,66 @@
         // ============================================
         // AMBIL DATA DARI THINGSPEAK
         // ============================================
+        function toNumber(value, fallback = 0) {
+            const number = parseFloat(value);
+            return Number.isFinite(number) ? number : fallback;
+        }
+
+        function parsePackedData(field8Value) {
+            // Format dari ESP32:
+            // distance|speed|power|energyUsed|energyRemaining|consumption|estimatedRange
+            const raw = String(field8Value || '');
+            const parts = raw.split('|');
+
+            return {
+                distance: toNumber(parts[0], 0),
+                speedKmph: toNumber(parts[1], NaN),
+                powerWatt: toNumber(parts[2], NaN),
+                energyUsedWh: toNumber(parts[3], 0),
+                energyRemainingWh: toNumber(parts[4], 0),
+                consumptionWhPerKm: toNumber(parts[5], 0),
+                estimatedRangeKm: toNumber(parts[6], 0)
+            };
+        }
+
         async function fetchData() {
             try {
-                const url = `https://api.thingspeak.com/channels/${CHANNEL_ID}/feeds/last.json?api_key=${READ_API_KEY}`;
+                // Pakai results=20 agar saat web mengirim command relay di field6,
+                // dashboard tetap mengambil data telemetry terakhir yang lengkap.
+                const url = `https://api.thingspeak.com/channels/${CHANNEL_ID}/feeds.json?api_key=${READ_API_KEY}&results=20`;
                 const response = await fetch(url);
-                const data = await response.json();
-                
+                const result = await response.json();
+                const feeds = (result.feeds || []).reverse();
+
+                const telemetry = feeds.find(feed =>
+                    feed.field1 !== null && feed.field1 !== '' &&
+                    feed.field2 !== null && feed.field2 !== '' &&
+                    feed.field3 !== null && feed.field3 !== '' &&
+                    feed.field8 !== null && feed.field8 !== ''
+                );
+
+                if (!telemetry) return null;
+
+                const packed = parsePackedData(telemetry.field8);
+                const voltageValue = toNumber(telemetry.field3, 0);
+                const currentValue = toNumber(telemetry.field4, 0);
+                const fallbackPower = voltageValue * currentValue;
+
                 return {
-                    lat: parseFloat(data.field1),
-                    lng: parseFloat(data.field2),
-                    voltage: parseFloat(data.field3),
-                    current: parseFloat(data.field4),
-                    soc: parseFloat(data.field5),
-                    relayStatus: parseInt(data.field7),
-                    distance: parseFloat(data.field8),
-                    createdAt: data.created_at
+                    lat: toNumber(telemetry.field1, 0),
+                    lng: toNumber(telemetry.field2, 0),
+                    voltage: voltageValue,
+                    current: currentValue,
+                    soc: toNumber(telemetry.field5, 0),
+                    relayStatus: parseInt(telemetry.field7 || 0),
+                    distance: packed.distance,
+                    speedKmph: Number.isFinite(packed.speedKmph) ? packed.speedKmph : 0,
+                    powerWatt: Number.isFinite(packed.powerWatt) ? packed.powerWatt : fallbackPower,
+                    energyUsedWh: packed.energyUsedWh,
+                    energyRemainingWh: packed.energyRemainingWh,
+                    consumptionWhPerKm: packed.consumptionWhPerKm,
+                    estimatedRangeKm: packed.estimatedRangeKm,
+                    createdAt: telemetry.created_at
                 };
             } catch (error) {
                 console.error('Error fetch data:', error);
@@ -467,11 +532,13 @@
             const data = await fetchData();
             if (!data) return;
             
-            // Hitung Daya (Watt = Volt × Arus)
-            const power = (data.voltage * data.current).toFixed(1);
+            // Daya dan kecepatan diambil dari ESP32.
+            // Jika data dari ESP32 belum tersedia, web tetap punya fallback hitungan sederhana.
+            const power = Number.isFinite(data.powerWatt) ? data.powerWatt.toFixed(1) : (data.voltage * data.current).toFixed(1);
+            let displaySpeed = Number.isFinite(data.speedKmph) ? data.speedKmph : estimatedSpeed;
             
-            // Hitung kecepatan dari perubahan posisi
-            if (lastLat !== null && lastLng !== null && lastTimestamp !== null && data.lat !== 0 && data.lng !== 0) {
+            // Fallback hitung kecepatan dari perubahan posisi jika speed dari GPS belum tersedia.
+            if ((displaySpeed === 0 || !Number.isFinite(displaySpeed)) && lastLat !== null && lastLng !== null && lastTimestamp !== null && data.lat !== 0 && data.lng !== 0) {
                 const currentTime = new Date(data.createdAt).getTime();
                 const timeDiffSeconds = (currentTime - lastTimestamp) / 1000;
                 
@@ -479,6 +546,7 @@
                     estimatedSpeed = calculateSpeed(lastLat, lastLng, data.lat, data.lng, timeDiffSeconds);
                     // Filter kecepatan tidak masuk akal (> 120 km/h)
                     if (estimatedSpeed > 120) estimatedSpeed = 0;
+                    displaySpeed = estimatedSpeed;
                 }
             }
             
@@ -511,9 +579,13 @@
             // Update stat cards
             document.getElementById('lat').innerHTML = data.lat.toFixed(6);
             document.getElementById('lng').innerHTML = data.lng.toFixed(6);
-            document.getElementById('speed').innerHTML = `${estimatedSpeed.toFixed(1)} <span class="stat-unit">km/h</span>`;
+            document.getElementById('speed').innerHTML = `${displaySpeed.toFixed(1)} <span class="stat-unit">km/h</span>`;
             document.getElementById('distance').innerHTML = `${data.distance.toFixed(2)} <span class="stat-unit">km</span>`;
             document.getElementById('power').innerHTML = `${power} <span class="stat-unit">W</span>`;
+            document.getElementById('energyUsed').innerHTML = `${data.energyUsedWh.toFixed(3)} <span class="stat-unit">Wh</span>`;
+            document.getElementById('energyRemaining').innerHTML = `${data.energyRemainingWh.toFixed(2)} <span class="stat-unit">Wh</span>`;
+            document.getElementById('consumption').innerHTML = `${data.consumptionWhPerKm.toFixed(2)} <span class="stat-unit">Wh/km</span>`;
+            document.getElementById('estimatedRange').innerHTML = `${data.estimatedRangeKm.toFixed(2)} <span class="stat-unit">km</span>`;
             
             // Update status ESP32 dengan warna
             const espStatusElement = document.getElementById('espStatus');
@@ -563,7 +635,9 @@
                         🔋 ${data.voltage.toFixed(1)} V | 📊 ${data.soc.toFixed(0)}%<br>
                         ⚡ ${data.current.toFixed(2)} A | 💡 ${power} Watt<br>
                         📏 ${data.distance.toFixed(2)} km<br>
-                        ⚡ ${estimatedSpeed.toFixed(1)} km/h<br>
+                        ⚡ ${displaySpeed.toFixed(1)} km/h<br>
+                        🔌 ${data.energyUsedWh.toFixed(3)} Wh terpakai<br>
+                        🛣️ ${data.estimatedRangeKm.toFixed(2)} km sisa<br>
                         🕐 ${new Date(data.createdAt).toLocaleTimeString('id-ID')}
                     `);
                 } else {
@@ -574,7 +648,9 @@
                             🔋 ${data.voltage.toFixed(1)} V | 📊 ${data.soc.toFixed(0)}%<br>
                             ⚡ ${data.current.toFixed(2)} A | 💡 ${power} Watt<br>
                             📏 ${data.distance.toFixed(2)} km<br>
-                            ⚡ ${estimatedSpeed.toFixed(1)} km/h
+                            ⚡ ${displaySpeed.toFixed(1)} km/h<br>
+                            🔌 ${data.energyUsedWh.toFixed(3)} Wh terpakai<br>
+                            🛣️ ${data.estimatedRangeKm.toFixed(2)} km sisa
                         `);
                 }
                 
